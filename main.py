@@ -1,134 +1,116 @@
 import os
 import time
-import sqlite3
-import secrets
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-# ================= ENV TOKEN =================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN env variable missing")
-
-ADMIN_IDS = [8558491786]
-
-# ================= DATABASE =================
-db = sqlite3.connect("license.db", check_same_thread=False)
-cur = db.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS licenses (
-    key TEXT PRIMARY KEY,
-    start REAL,
-    duration INTEGER,
-    user INTEGER,
-    blocked INTEGER
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes
 )
-""")
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user INTEGER PRIMARY KEY,
-    first_seen REAL
-)
-""")
-db.commit()
+# ================= CONFIG =================
 
-# ================= HELPERS =================
-def is_admin(uid):
-    return uid in ADMIN_IDS
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Render ENV variable
+START_TIME = time.time()
 
-def time_left(start, dur):
-    left = int((start + dur) - time.time())
-    if left <= 0:
-        return "EXPIRED"
-    m = left // 60
-    h = m // 60
-    d = h // 24
-    if d > 0: return f"{d} days"
-    if h > 0: return f"{h} hours"
-    return f"{m} minutes"
+KEYS = {}
+ACTIVE_USERS = set()
+ADMIN_IDS = {8558491786}  # <-- apna Telegram ID daal
+
+# ================= UTILS =================
+
+def uptime():
+    seconds = int(time.time() - START_TIME)
+    mins, sec = divmod(seconds, 60)
+    hrs, mins = divmod(mins, 60)
+    return f"{hrs}h {mins}m {sec}s"
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 # ================= COMMANDS =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    cur.execute("INSERT OR IGNORE INTO users VALUES (?,?)", (uid, time.time()))
-    db.commit()
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔐 Personal Access Required\n\n"
+        "🔐 *Personal Access Required*\n\n"
         "Enter your license key\n"
         "Example:\n"
-        "/key INFO-ABC123XYZ456\n\n"
-        "📩 Contact Admin 👉 @Iamdhruv011"
+        "`/key INFO-ABC123XYZ456`",
+        parse_mode="Markdown"
     )
 
-async def admincmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+async def key_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        await update.message.reply_text("❌ Usage: /key <LICENSE_KEY>")
         return
-    await update.message.reply_text(
-        "/genkey\n/showkeys\n/activeusers\n/user\n/blockkey KEY\n/resume KEY"
-    )
+
+    key = context.args[0].upper()
+
+    if key not in KEYS:
+        await update.message.reply_text("❌ Invalid key")
+        return
+
+    if KEYS[key]["blocked"]:
+        await update.message.reply_text("🚫 This key is blocked")
+        return
+
+    user_id = update.effective_user.id
+    ACTIVE_USERS.add(user_id)
+
+    await update.message.reply_text("✅ Access granted")
 
 async def genkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    key = "INFO-" + secrets.token_hex(6).upper()
-    duration = 24 * 60 * 60
-    cur.execute("INSERT INTO licenses VALUES (?,?,?,?,?)",
-                (key, None, duration, None, 0))
-    db.commit()
-    await update.message.reply_text(f"✅ Key Generated:\n\n`{key}`", parse_mode="Markdown")
 
-async def key_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return
-    key = context.args[0]
-    uid = update.effective_user.id
-
-    cur.execute("SELECT * FROM licenses WHERE key=?", (key,))
-    row = cur.fetchone()
-    if not row:
-        await update.message.reply_text("❌ Invalid key")
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /genkey <KEY>")
         return
 
-    _, start, dur, user, blocked = row
-    if blocked:
-        await update.message.reply_text("🚫 Key blocked")
-        return
-    if user and user != uid:
-        await update.message.reply_text("🔒 Key already used")
-        return
+    key = context.args[0].upper()
+    KEYS[key] = {"blocked": False}
 
-    if not start:
-        start = time.time()
-        user = uid
-        cur.execute("UPDATE licenses SET start=?, user=? WHERE key=?",
-                    (start, user, key))
-        db.commit()
+    await update.message.reply_text(f"🔑 Key generated:\n`{key}`", parse_mode="Markdown")
 
-    await update.message.reply_text(
-        f"✅ Access Granted\n⏳ Time Left: {time_left(start, dur)}"
-    )
-
-async def showkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def blockkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    cur.execute("SELECT * FROM licenses")
-    rows = cur.fetchall()
-    text = ""
-    for r in rows:
-        status = "BLOCKED" if r[4] else time_left(r[1], r[2]) if r[1] else "UNUSED"
-        text += f"{r[0]} → {status}\n"
-    await update.message.reply_text(text or "No keys")
 
-# ================= RUN =================
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /blockkey <KEY>")
+        return
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("admincmd", admincmd))
-app.add_handler(CommandHandler("genkey", genkey))
-app.add_handler(CommandHandler("key", key_cmd))
-app.add_handler(CommandHandler("showkeys", showkeys))
+    key = context.args[0].upper()
+    if key in KEYS:
+        KEYS[key]["blocked"] = True
+        await update.message.reply_text("🔒 Key blocked")
+    else:
+        await update.message.reply_text("❌ Key not found")
 
-app.run_polling()
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"🟢 *SYSTEM OK*\n\n"
+        f"⏱ Uptime: `{uptime()}`\n"
+        f"👥 Active Users: `{len(ACTIVE_USERS)}`\n"
+        f"🔑 Total Keys: `{len(KEYS)}`",
+        parse_mode="Markdown"
+    )
+
+# ================= MAIN =================
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN not set in environment variables")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("key", key_cmd))
+    app.add_handler(CommandHandler("genkey", genkey))
+    app.add_handler(CommandHandler("blockkey", blockkey))
+    app.add_handler(CommandHandler("health", health))
+
+    print("✅ InfoTrace Bot Started")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
