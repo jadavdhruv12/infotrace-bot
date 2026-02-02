@@ -3,13 +3,15 @@ import time
 import sqlite3
 import secrets
 import telebot
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ================= ENV =================
+# ================= ENV TOKEN =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN env variable missing")
 
-ADMIN_IDS = [8558491786]  # apna telegram id
+ADMIN_IDS = [8558491786]  # apna telegram user id
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
@@ -54,7 +56,8 @@ def time_left(start, dur):
         return f"{h} hours"
     return f"{m} minutes"
 
-# ================= USER =================
+# ================= BOT COMMANDS =================
+
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     uid = message.from_user.id
@@ -70,19 +73,44 @@ def start_cmd(message):
         "📩 Contact Admin 👉 @Iamdhruv011"
     )
 
+@bot.message_handler(commands=['admincmd'])
+def admincmd(message):
+    if not is_admin(message.from_user.id):
+        return
+    bot.reply_to(
+        message,
+        "👑 *Admin Panel*\n\n"
+        "/genkey – Generate key\n"
+        "/showkeys – Show all keys\n"
+        "/blockkey KEY – Block key\n"
+        "/resume KEY – Resume key"
+    )
+
+@bot.message_handler(commands=['genkey'])
+def genkey(message):
+    if not is_admin(message.from_user.id):
+        return
+    key = "INFO-" + secrets.token_hex(6).upper()
+    duration = 24 * 60 * 60  # 1 day
+    cur.execute(
+        "INSERT INTO licenses VALUES (?,?,?,?,?)",
+        (key, None, duration, None, 0)
+    )
+    db.commit()
+    bot.reply_to(message, f"✅ *Key Generated:*\n\n`{key}`")
+
 @bot.message_handler(commands=['key'])
 def key_cmd(message):
     parts = message.text.split()
     if len(parts) != 2:
-        bot.reply_to(message, "❌ Usage: `/key YOUR_KEY`")
+        bot.reply_to(message, "Usage: /key YOURKEY")
         return
 
-    key = parts[1].upper()
+    key = parts[1]
     uid = message.from_user.id
 
     cur.execute("SELECT * FROM licenses WHERE key=?", (key,))
     row = cur.fetchone()
-
     if not row:
         bot.reply_to(message, "❌ Invalid key")
         return
@@ -90,7 +118,7 @@ def key_cmd(message):
     _, start, dur, user, blocked = row
 
     if blocked:
-        bot.reply_to(message, "🚫 This key is blocked")
+        bot.reply_to(message, "🚫 Key blocked")
         return
 
     if user and user != uid:
@@ -108,60 +136,22 @@ def key_cmd(message):
 
     bot.reply_to(
         message,
-        f"✅ *Access Granted*\n"
-        f"⏳ Time Left: `{time_left(start, dur)}`"
-    )
-
-# ================= ADMIN =================
-@bot.message_handler(commands=['admincmd'])
-def admincmd(message):
-    if not is_admin(message.from_user.id):
-        return
-
-    bot.reply_to(
-        message,
-        "👑 *Admin Commands*\n\n"
-        "/genkey\n"
-        "/showkeys\n"
-        "/blockkey KEY\n"
-        "/resume KEY\n"
-        "/dashboard"
-    )
-
-@bot.message_handler(commands=['genkey'])
-def genkey(message):
-    if not is_admin(message.from_user.id):
-        return
-
-    key = "INFO-" + secrets.token_hex(6).upper()
-    duration = 24 * 60 * 60  # 1 day
-
-    cur.execute(
-        "INSERT INTO licenses VALUES (?,?,?,?,?)",
-        (key, None, duration, None, 0)
-    )
-    db.commit()
-
-    bot.reply_to(
-        message,
-        f"✅ *New Key Generated*\n\n`{key}`"
+        f"✅ *Access Granted*\n⏳ Time Left: `{time_left(start, dur)}`"
     )
 
 @bot.message_handler(commands=['showkeys'])
 def showkeys(message):
     if not is_admin(message.from_user.id):
         return
-
     cur.execute("SELECT * FROM licenses")
     rows = cur.fetchall()
-
     if not rows:
         bot.reply_to(message, "No keys found")
         return
 
-    text = "🔑 *All License Keys*\n\n"
+    text = "🔑 *All Keys*\n\n"
     for r in rows:
-        status = "🚫 BLOCKED" if r[4] else time_left(r[1], r[2])
+        status = "BLOCKED" if r[4] else time_left(r[1], r[2])
         text += f"`{r[0]}` → {status}\n"
 
     bot.reply_to(message, text)
@@ -170,60 +160,49 @@ def showkeys(message):
 def blockkey(message):
     if not is_admin(message.from_user.id):
         return
-
     parts = message.text.split()
     if len(parts) != 2:
         return
-
-    key = parts[1].upper()
+    key = parts[1]
     cur.execute("UPDATE licenses SET blocked=1 WHERE key=?", (key,))
     db.commit()
-
     bot.reply_to(message, f"🚫 Key blocked: `{key}`")
 
 @bot.message_handler(commands=['resume'])
 def resume(message):
     if not is_admin(message.from_user.id):
         return
-
     parts = message.text.split()
     if len(parts) != 2:
         return
-
-    key = parts[1].upper()
+    key = parts[1]
     cur.execute("UPDATE licenses SET blocked=0 WHERE key=?", (key,))
     db.commit()
-
     bot.reply_to(message, f"✅ Key resumed: `{key}`")
 
-# ================= DASHBOARD =================
-@bot.message_handler(commands=['dashboard'])
-def dashboard(message):
-    if not is_admin(message.from_user.id):
-        return
+# ================= WEBSITE (CRON / KEEP ALIVE) =================
 
-    cur.execute("SELECT COUNT(*) FROM users")
-    users = cur.fetchone()[0]
+def run_web():
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"""
+            <html>
+            <head><title>InfoTrace</title></head>
+            <body style="background:#0f172a;color:#22d3ee;
+            display:flex;justify-content:center;align-items:center;height:100vh;">
+            <h1>InfoTrace Bot is Running 🚀</h1>
+            </body>
+            </html>
+            """)
 
-    cur.execute("SELECT COUNT(*) FROM licenses")
-    total_keys = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM licenses WHERE blocked=1")
-    blocked = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM licenses WHERE start IS NOT NULL")
-    active = cur.fetchone()[0]
-
-    bot.reply_to(
-        message,
-        "📊 *INFO TRACE – ADMIN DASHBOARD*\n\n"
-        f"👥 Users: `{users}`\n"
-        f"🔑 Total Keys: `{total_keys}`\n"
-        f"✅ Active Keys: `{active}`\n"
-        f"🚫 Blocked Keys: `{blocked}`\n\n"
-        "⚙️ System: `ONLINE`"
-    )
+    server = HTTPServer(("0.0.0.0", 10000), Handler)
+    server.serve_forever()
 
 # ================= RUN =================
-print("Bot running...")
+print("InfoTrace bot running...")
+
+threading.Thread(target=run_web).start()
 bot.infinity_polling()
