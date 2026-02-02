@@ -188,7 +188,9 @@ def run_web():
             self.send_response(200)
             self.send_header("Content-type", "text/html")
             self.end_headers()
-            self.wfile.write(b"""
+            self.wfile.write("""
+            InfoTrace Bot is Running 🚀
+            """.encode("utf-8"))
             <html>
             <head><title>InfoTrace</title></head>
             <body style="background:#0f172a;color:#22d3ee;
