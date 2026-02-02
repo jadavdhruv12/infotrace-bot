@@ -1,183 +1,229 @@
 import os
-import logging
-from datetime import datetime, timedelta
+import time
+import sqlite3
+import secrets
+import telebot
 
-from telegram import Update, ParseMode
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext
-)
-
-# =======================
-# CONFIG
-# =======================
-
+# ================= ENV =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_USERNAME = "Iamdhruv011"
-BOT_NAME = "InfoTrace"
-KEY_PREFIX = "INF"
-
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set in environment variables")
+    raise RuntimeError("BOT_TOKEN env variable missing")
 
-# =======================
-# LOGGING
-# =======================
+ADMIN_IDS = [8558491786]  # apna telegram id
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
+
+# ================= DATABASE =================
+db = sqlite3.connect("license.db", check_same_thread=False)
+cur = db.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS licenses (
+    key TEXT PRIMARY KEY,
+    start REAL,
+    duration INTEGER,
+    user INTEGER,
+    blocked INTEGER
 )
-logger = logging.getLogger(__name__)
+""")
 
-# =======================
-# IN-MEMORY DATA
-# (later DB laga sakta hai)
-# =======================
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user INTEGER PRIMARY KEY,
+    first_seen REAL
+)
+""")
+db.commit()
 
-LICENSE_KEYS = {}
-ACTIVE_USERS = set()
-BLOCKED_KEYS = set()
+# ================= HELPERS =================
+def is_admin(uid):
+    return uid in ADMIN_IDS
 
-# =======================
-# UTIL FUNCTIONS
-# =======================
+def time_left(start, dur):
+    if not start:
+        return "UNUSED"
+    left = int((start + dur) - time.time())
+    if left <= 0:
+        return "EXPIRED"
+    m = left // 60
+    h = m // 60
+    d = h // 24
+    if d > 0:
+        return f"{d} days"
+    if h > 0:
+        return f"{h} hours"
+    return f"{m} minutes"
 
-def generate_key():
-    import random
-    import string
-    rand = "".join(random.choices(string.ascii_uppercase + string.digits, k=12))
-    return f"{KEY_PREFIX}-{rand}"
+# ================= USER =================
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    uid = message.from_user.id
+    cur.execute("INSERT OR IGNORE INTO users VALUES (?,?)", (uid, time.time()))
+    db.commit()
 
-# =======================
-# USER COMMANDS
-# =======================
-
-def start(update: Update, context: CallbackContext):
-    text = (
+    bot.reply_to(
+        message,
         "🔐 *Personal Access Required*\n\n"
         "Enter your license key\n"
         "Example:\n"
-        f"`/key {KEY_PREFIX}-ABC123XYZ456`\n\n"
-        f"📩 Contact Admin 👉 @{ADMIN_USERNAME}"
-    )
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-def key_cmd(update: Update, context: CallbackContext):
-    if not context.args:
-        update.message.reply_text("❌ Please provide a license key.")
-        return
-
-    key = context.args[0].strip().upper()
-
-    if key in BLOCKED_KEYS:
-        update.message.reply_text("🚫 This key is blocked.")
-        return
-
-    if key not in LICENSE_KEYS:
-        update.message.reply_text("❌ Invalid license key.")
-        return
-
-    expiry = LICENSE_KEYS[key]
-    if datetime.utcnow() > expiry:
-        update.message.reply_text("⌛ License expired.")
-        return
-
-    ACTIVE_USERS.add(update.effective_user.id)
-    update.message.reply_text("✅ Access granted. Welcome to InfoTrace.")
-
-# =======================
-# ADMIN COMMANDS
-# =======================
-
-def is_admin(update: Update):
-    return update.effective_user.username == ADMIN_USERNAME
-
-def admincmd(update: Update, context: CallbackContext):
-    if not is_admin(update):
-        update.message.reply_text("❌ Admin only.")
-        return
-
-    text = (
-        "👑 *Admin Licence Commands*\n\n"
-        "/genkey – Generate new licence key\n"
-        "/showkeys – View licence keys\n"
-        "/activeusers – View active users\n"
-        "/blockkey <KEY> – Block licence key\n"
-    )
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-def genkey(update: Update, context: CallbackContext):
-    if not is_admin(update):
-        return
-
-    key = generate_key()
-    expiry = datetime.utcnow() + timedelta(days=30)
-    LICENSE_KEYS[key] = expiry
-
-    update.message.reply_text(
-        f"✅ *New Key Generated*\n\n"
-        f"`{key}`\n"
-        f"🕒 Valid till: {expiry.strftime('%Y-%m-%d')}",
-        parse_mode=ParseMode.MARKDOWN
+        "`/key INFO-ABC123XYZ456`\n\n"
+        "📩 Contact Admin 👉 @Iamdhruv011"
     )
 
-def showkeys(update: Update, context: CallbackContext):
-    if not is_admin(update):
+@bot.message_handler(commands=['key'])
+def key_cmd(message):
+    parts = message.text.split()
+    if len(parts) != 2:
+        bot.reply_to(message, "❌ Usage: `/key YOUR_KEY`")
         return
 
-    if not LICENSE_KEYS:
-        update.message.reply_text("No keys found.")
+    key = parts[1].upper()
+    uid = message.from_user.id
+
+    cur.execute("SELECT * FROM licenses WHERE key=?", (key,))
+    row = cur.fetchone()
+
+    if not row:
+        bot.reply_to(message, "❌ Invalid key")
         return
 
-    msg = "🔑 *All Licence Keys*\n\n"
-    for k, v in LICENSE_KEYS.items():
-        msg += f"`{k}` → {v.strftime('%Y-%m-%d')}\n"
+    _, start, dur, user, blocked = row
 
-    update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-def activeusers(update: Update, context: CallbackContext):
-    if not is_admin(update):
+    if blocked:
+        bot.reply_to(message, "🚫 This key is blocked")
         return
 
-    update.message.reply_text(f"👥 Active Users: {len(ACTIVE_USERS)}")
-
-def blockkey(update: Update, context: CallbackContext):
-    if not is_admin(update):
+    if user and user != uid:
+        bot.reply_to(message, "🔒 Key already used")
         return
 
-    if not context.args:
-        update.message.reply_text("Usage: /blockkey KEY")
+    if not start:
+        start = time.time()
+        user = uid
+        cur.execute(
+            "UPDATE licenses SET start=?, user=? WHERE key=?",
+            (start, user, key)
+        )
+        db.commit()
+
+    bot.reply_to(
+        message,
+        f"✅ *Access Granted*\n"
+        f"⏳ Time Left: `{time_left(start, dur)}`"
+    )
+
+# ================= ADMIN =================
+@bot.message_handler(commands=['admincmd'])
+def admincmd(message):
+    if not is_admin(message.from_user.id):
         return
 
-    key = context.args[0].upper()
-    BLOCKED_KEYS.add(key)
-    update.message.reply_text(f"🚫 Key blocked: `{key}`", parse_mode=ParseMode.MARKDOWN)
+    bot.reply_to(
+        message,
+        "👑 *Admin Commands*\n\n"
+        "/genkey\n"
+        "/showkeys\n"
+        "/blockkey KEY\n"
+        "/resume KEY\n"
+        "/dashboard"
+    )
 
-# =======================
-# MAIN
-# =======================
+@bot.message_handler(commands=['genkey'])
+def genkey(message):
+    if not is_admin(message.from_user.id):
+        return
 
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    key = "INFO-" + secrets.token_hex(6).upper()
+    duration = 24 * 60 * 60  # 1 day
 
-    # User commands
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("key", key_cmd))
+    cur.execute(
+        "INSERT INTO licenses VALUES (?,?,?,?,?)",
+        (key, None, duration, None, 0)
+    )
+    db.commit()
 
-    # Admin commands
-    dp.add_handler(CommandHandler("admincmd", admincmd))
-    dp.add_handler(CommandHandler("genkey", genkey))
-    dp.add_handler(CommandHandler("showkeys", showkeys))
-    dp.add_handler(CommandHandler("activeusers", activeusers))
-    dp.add_handler(CommandHandler("blockkey", blockkey))
+    bot.reply_to(
+        message,
+        f"✅ *New Key Generated*\n\n`{key}`"
+    )
 
-    updater.start_polling()
-    updater.idle()
+@bot.message_handler(commands=['showkeys'])
+def showkeys(message):
+    if not is_admin(message.from_user.id):
+        return
 
-if __name__ == "__main__":
-    main()
+    cur.execute("SELECT * FROM licenses")
+    rows = cur.fetchall()
+
+    if not rows:
+        bot.reply_to(message, "No keys found")
+        return
+
+    text = "🔑 *All License Keys*\n\n"
+    for r in rows:
+        status = "🚫 BLOCKED" if r[4] else time_left(r[1], r[2])
+        text += f"`{r[0]}` → {status}\n"
+
+    bot.reply_to(message, text)
+
+@bot.message_handler(commands=['blockkey'])
+def blockkey(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        return
+
+    key = parts[1].upper()
+    cur.execute("UPDATE licenses SET blocked=1 WHERE key=?", (key,))
+    db.commit()
+
+    bot.reply_to(message, f"🚫 Key blocked: `{key}`")
+
+@bot.message_handler(commands=['resume'])
+def resume(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+    if len(parts) != 2:
+        return
+
+    key = parts[1].upper()
+    cur.execute("UPDATE licenses SET blocked=0 WHERE key=?", (key,))
+    db.commit()
+
+    bot.reply_to(message, f"✅ Key resumed: `{key}`")
+
+# ================= DASHBOARD =================
+@bot.message_handler(commands=['dashboard'])
+def dashboard(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    cur.execute("SELECT COUNT(*) FROM users")
+    users = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM licenses")
+    total_keys = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM licenses WHERE blocked=1")
+    blocked = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM licenses WHERE start IS NOT NULL")
+    active = cur.fetchone()[0]
+
+    bot.reply_to(
+        message,
+        "📊 *INFO TRACE – ADMIN DASHBOARD*\n\n"
+        f"👥 Users: `{users}`\n"
+        f"🔑 Total Keys: `{total_keys}`\n"
+        f"✅ Active Keys: `{active}`\n"
+        f"🚫 Blocked Keys: `{blocked}`\n\n"
+        "⚙️ System: `ONLINE`"
+    )
+
+# ================= RUN =================
+print("Bot running...")
+bot.infinity_polling()
