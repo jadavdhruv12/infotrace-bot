@@ -189,16 +189,16 @@ def run_web():
             self.send_header("Content-type", "text/html")
             self.end_headers()
             self.wfile.write("""
-            InfoTrace Bot is Running 🚀
-            """.encode("utf-8"))
             <html>
-            <head><title>InfoTrace</title></head>
+            <head>
+            <title>InfoTrace</title>
+            </head>
             <body style="background:#0f172a;color:#22d3ee;
             display:flex;justify-content:center;align-items:center;height:100vh;">
             <h1>InfoTrace Bot is Running 🚀</h1>
             </body>
             </html>
-            """)
+            """.encode("utf-8"))
 
     server = HTTPServer(("0.0.0.0", 10000), Handler)
     server.serve_forever()
